@@ -1,5 +1,7 @@
 # บันทึกงาน — MSI XML Collector
 
+> ถ้าอยากรู้โครงสร้างโปรเจกต์ ไฟล์ไหนทำอะไร อยู่ตรงไหน → อ่าน [project_map.md](project_map.md)
+
 ## ทำแล้ว ✅
 
 ### Scout (Console App — รันบน USB)
