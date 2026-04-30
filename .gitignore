@@ -1,0 +1,23 @@
+# Security — never commit these
+secrets.key
+*.key
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Build outputs
+bin/
+obj/
+Collected_XMLs/
+
+# VS/Rider
+.vs/
+.idea/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db

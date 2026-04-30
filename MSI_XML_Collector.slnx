@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Manager/Manager.csproj" />
+  <Project Path="Scout/Scout.csproj" />
+</Solution>
