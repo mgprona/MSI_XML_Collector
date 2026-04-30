@@ -1,34 +1,49 @@
 # MSI XML Collector — Architecture
 
-## Solution Structure
+## ภาพรวมระบบ
+
+รวบรวมไฟล์ XML ของงานสำรวจที่ดิน (DOL) จากหลายเครื่องผ่าน USB  
+ใช้ MD5 hash คุม deduplication, รองรับ XML แบบ plain และเข้ารหัส AES
 
 ```
-MSI_XML_Collector.sln
-├── Scout/          (Console App — runs on USB, collects files)
-└── Manager/        (WPF App — dashboard, review, import)
-```
-
-## USB Layout
-
-```
-Scout_XML.exe
-secrets.key          ← AES key (NOT in git, NOT in DB)
-Master_Index.db      ← SQLite metadata store
-Collected_XMLs\
-  [MachineName]\
-    [relative path to original file]
+[เครื่องสนาม A] ──┐
+[เครื่องสนาม B] ──┼── Scout_XML.exe ──→ USB ──→ Manager.exe ──→ Master DB
+[เครื่องสนาม C] ──┘
 ```
 
 ---
 
-## XML Formats
+## Solution Structure
+
+```
+MSI_XML_Collector/
+├── Scout/          Console App — รันบน USB, เก็บไฟล์จากเครื่องสนาม
+└── Manager/        WPF App — dashboard, filter, preview, merge DB
+```
+
+---
+
+## โครงสร้าง USB
+
+```
+Scout_XML.exe
+secrets.key          ← 48-byte AES key (ไม่อยู่ใน git)
+Master_Index.db      ← SQLite metadata store (ไม่อยู่ใน git)
+Collected_XMLs\
+  [MachineName]\
+    [relative path จาก drive root]
+```
+
+---
+
+## XML สองรูปแบบ
 
 ### Plaintext (เวอร์ชันเก่า)
 ```xml
 <NewDataSet>
   <TB_SVC_SURVEYDESC>
     <SURVEYJOB_NO>389/2569</SURVEYJOB_NO>
-    <OWNER_NAME>...</OWNER_NAME>
+    <OWNER_NAME>นายบุญร่วม แก้วสมนึก</OWNER_NAME>
     <QUEUE_DATE>2026-02-25T00:00:00+07:00</QUEUE_DATE>
     <PROVINCE_NAME>บุรีรัมย์</PROVINCE_NAME>
     ...
@@ -40,118 +55,160 @@ Collected_XMLs\
 ```xml
 <Root>
   <TB_ENCRYPT>
-    <data>Base64(IV[16 bytes] + AES-256-CBC ciphertext)</data>
+    <data>Base64(AES-256-CBC ciphertext)</data>
   </TB_ENCRYPT>
 </Root>
 ```
-Decrypted payload = plaintext XML with same `<NewDataSet>` structure.
+Decrypted payload = plaintext XML ที่มีโครงสร้าง `<NewDataSet>` เหมือนกัน  
+IV **ไม่ได้ prepend** ใน ciphertext — IV มาจาก `secrets.key` bytes [32..47]
 
 ---
 
-## Scout Pipeline (Phase 2)
+## secrets.key — รูปแบบและวิธีสร้าง
+
+`secrets.key` = raw binary file, **48 bytes** แน่นอน:
+
+| Bytes   | ความหมาย                          |
+|---------|-----------------------------------|
+| [0..31] | AES-256 key (SHA-256 ของ passphrase) |
+| [32..47]| AES IV (MD5 ของ passphrase)          |
+
+passphrase มาจากระบบ MSI ต้นฉบับ (com.dol.samart.svc) — เก็บใน password manager ขององค์กร ไม่บันทึกใน repo
+
+**วิธีสร้าง secrets.key (PowerShell):**
+```powershell
+$p     = "<passphrase>"
+$bytes = [Text.Encoding]::UTF8.GetBytes($p)
+$key   = [Security.Cryptography.SHA256]::Create().ComputeHash($bytes)  # 32 bytes
+$iv    = [Security.Cryptography.MD5]::Create().ComputeHash($bytes)     # 16 bytes
+[IO.File]::WriteAllBytes("secrets.key", ($key + $iv))                  # 48 bytes total
+```
+
+---
+
+## Scout Pipeline
 
 ```
-*.xml file on disk
+Drive auto-discovery
+   ├─ C:\  → DOLCAD_XML, Users\*\Desktop, Users\*\Documents เท่านั้น
+   └─ D:\, E:\, ... (Fixed, ไม่ใช่ drive ที่ exe รันอยู่) → สแกนทั้ง drive
+   │
+   ▼
+SafeEnumerateXml (*.xml, recursive, ข้าม access-denied โดยไม่หยุด)
    │
    ▼
 XmlIdentifier.Detect(bytes)
    ├─ root=<Root>       → Encrypted
    ├─ root=<NewDataSet> → Plaintext
-   └─ other            → Unknown → skip + log
+   └─ อื่นๆ            → Unknown → [SKIP]
    │
-   ▼ (if Encrypted)
+   ▼ (ถ้า Encrypted)
 AesDecryptor.DecryptXml(bytes)
-   └─ loads secrets.key (16/24/32 bytes raw binary)
-   └─ extracts TB_ENCRYPT/data (Base64)
-   └─ AES-256-CBC: first 16 bytes = IV, rest = ciphertext
-   └─ returns plaintext bytes IN MEMORY ONLY
+   └─ key = secrets.key[0..31], IV = secrets.key[32..47]
+   └─ Base64 decode → AES-256-CBC decrypt → plaintext bytes (in memory only)
    │
    ▼
-MD5.HashData(plaintextBytes)  → FileHash (hex string)
+MD5.HashData(plaintextBytes) → FileHash (hex)
+   │
+   ├─ ExistsByHash(hash, machineName) → ซ้ำ? → [DUP] skip
    │
    ▼
-FileRecordRepository.ExistsByHash(hash, machineName)
-   └─ duplicate? → [DUP] log → skip
+XmlParser.Parse(plaintextBytes) → SurveyFields (จาก TB_SVC_SURVEYDESC แถวแรก)
    │
    ▼
-XmlParser.Parse(plaintextBytes)
-   └─ picks first TB_SVC_SURVEYDESC row
-   └─ returns SurveyFields
+FileRecordRepository.Upsert(FileRecord) → บันทึกลง SQLite
    │
    ▼
-FileRecordRepository.Upsert(FileRecord)
-   │
-   ▼
-Copy original file (encrypted or plain) to:
-  Collected_XMLs\[MachineName]\[relative path]
+Copy ไฟล์ต้นฉบับ (encrypted หรือ plain) →
+  Collected_XMLs\[MachineName]\[relative path จาก drive root]
 ```
-
----
-
-## SQLite Schema — Files table
-
-| Column           | Type    | Notes                                    |
-|------------------|---------|------------------------------------------|
-| Id               | INTEGER | PK autoincrement                         |
-| FileHash         | TEXT    | MD5 of **plaintext** bytes (hex)         |
-| OriginalFileName | TEXT    |                                          |
-| OriginalPath     | TEXT    | Full path on source machine              |
-| MachineName      | TEXT    | `Environment.MachineName`                |
-| FileSize         | INTEGER | Bytes (of original/raw file)             |
-| IsEncrypted      | INTEGER | 0 = plaintext, 1 = encrypted             |
-| LastWriteTime    | TEXT    | ISO-8601 UTC                             |
-| CollectedAt      | TEXT    | ISO-8601 UTC, set at collection time     |
-| SurveyJobNo      | TEXT    | From TB_SVC_SURVEYDESC.SURVEYJOB_NO      |
-| OwnerName        | TEXT    | OWNER_NAME                               |
-| QueueDate        | TEXT    | QUEUE_DATE                               |
-| ProvinceName     | TEXT    | PROVINCE_NAME                            |
-| AmphurSeq        | INTEGER | AMPHUR_SEQ                               |
-| TambolSeq        | INTEGER | TAMBOL_SEQ                               |
-| LandNo           | INTEGER | LAND_NO                                  |
-| SurveyNo         | INTEGER | SURVEY_NO                                |
-| SurveyorName     | TEXT    | SURVEYOR_NAME                            |
-
-**Unique index:** `(FileHash, MachineName)` — same file from different machines = separate rows.
-
----
-
-## AES Key Format
-
-`secrets.key` = raw binary file, **16, 24, or 32 bytes** (AES-128 / AES-192 / AES-256).  
-No header, no encoding — pure key bytes.
 
 ---
 
 ## Scout CLI
 
 ```
-Scout_XML.exe --source <folder> [--key <path>] [--db <path>]
+Scout_XML.exe [--source <folder>] [--key <path>] [--db <path>]
 
-Defaults:
-  --key   → secrets.key  (next to exe)
-  --db    → Master_Index.db (next to exe)
+ค่าเริ่มต้น:
+  --key  → secrets.key  (ข้างๆ exe)
+  --db   → Master_Index.db (ข้างๆ exe)
+
+ไม่มี --source = Auto mode (scan ตาม drive rules ด้านบน)
+มี --source    = Manual mode (scan เฉพาะโฟลเดอร์นั้น — ใช้ทดสอบ)
+
+Exit codes:
+  0 = สำเร็จทุกไฟล์
+  1 = arguments ผิดพลาด
+  2 = มี error อย่างน้อย 1 ไฟล์
 ```
 
-Exit codes: `0` = success, `1` = bad args, `2` = one or more file errors.
+---
+
+## SQLite Schema — Files table
+
+| Column           | Type    | หมายเหตุ                              |
+|------------------|---------|---------------------------------------|
+| Id               | INTEGER | PK autoincrement                      |
+| FileHash         | TEXT    | MD5 ของ **plaintext** bytes (hex)     |
+| OriginalFileName | TEXT    |                                       |
+| OriginalPath     | TEXT    | Full path บนเครื่องต้นทาง            |
+| MachineName      | TEXT    | `Environment.MachineName`             |
+| FileSize         | INTEGER | bytes ของไฟล์ต้นฉบับ (raw)           |
+| IsEncrypted      | INTEGER | 0 = plain, 1 = encrypted              |
+| LastWriteTime    | TEXT    | ISO-8601 UTC                          |
+| CollectedAt      | TEXT    | ISO-8601 UTC                          |
+| SurveyJobNo      | TEXT    | SURVEYJOB_NO                          |
+| OwnerName        | TEXT    | OWNER_NAME                            |
+| QueueDate        | TEXT    | QUEUE_DATE                            |
+| ProvinceName     | TEXT    | PROVINCE_NAME                         |
+| AmphurSeq        | INTEGER | AMPHUR_SEQ                            |
+| TambolSeq        | INTEGER | TAMBOL_SEQ                            |
+| LandNo           | INTEGER | LAND_NO                               |
+| SurveyNo         | INTEGER | SURVEY_NO                             |
+| SurveyorName     | TEXT    | SURVEYOR_NAME                         |
+
+**Unique index:** `(FileHash, MachineName)` — ไฟล์เดียวกันจากคนละเครื่อง = คนละ row
 
 ---
 
-## Phases
+## Manager Features
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| 1 | ✅ Done | SQLite schema + repository |
-| 2 | ✅ Done | Scout pipeline (identify → decrypt → hash → parse → save → copy) |
-| 3 | 🔲 Todo | WPF Manager (DataGrid, preview, conflict, bulk import, DB merge) |
-| 4 | 🔲 Todo | Integration tests + edge cases |
+| Feature           | รายละเอียด                                                    |
+|-------------------|---------------------------------------------------------------|
+| Open DB           | เปิด `Master_Index.db` จาก USB หรือ local                    |
+| DataGrid          | แสดงทุก record, sort ได้ทุก column                           |
+| Filter            | กรองตามจังหวัด / เครื่อง / ค้นหา text / เฉพาะไฟล์ซ้ำ       |
+| Conflict detection| แถวที่มี SurveyJobNo ซ้ำกัน → พื้นหลังสีเหลือง              |
+| Preview           | แสดง metadata + อ่าน XML จาก `Collected_XMLs\` อัตโนมัติ   |
+| Merge             | merge records จาก DB อื่น (USB ที่ 2) เข้า DB ปัจจุบัน      |
 
 ---
 
-## Edge Cases (Phase 4)
+## Integration Test Results
 
-- `secrets.key` missing / wrong key → clear error, no crash
-- Corrupt XML → skip + log, continue to next file
-- USB disk full → IOException caught, logged as error
-- Duplicate machine name → handled by `(FileHash, MachineName)` unique index
-- Same file copied from two machines → two separate rows in DB
-- File with no TB_SVC_SURVEYDESC data → row saved with null parsed fields
+ทดสอบด้วยไฟล์จริงใน `docs/`:
+
+| ไฟล์                    | รูปแบบ    | ผล                          |
+|-------------------------|-----------|------------------------------|
+| `2011_25-02-2569.XML`   | Plaintext | ✅ `[OK] [PLAIN] 389/2569`  |
+| `1006_25-11-2563.XML`   | Encrypted | ✅ `[OK] [ENC] 294/2564`    |
+
+| Scenario               | ผล                                          |
+|------------------------|----------------------------------------------|
+| secrets.key missing    | `[WARN]` + ต่อ, encrypted file → `[ERROR]`  |
+| secrets.key ถูกต้อง   | decrypt + parse ครบ                          |
+| รันซ้ำไฟล์เดิม        | `[DUP]` — ไม่บันทึกซ้ำ                      |
+| โฟลเดอร์ access denied | ข้ามโดยไม่ crash                             |
+
+---
+
+## สถานะการพัฒนา
+
+| Phase | Status | คำอธิบาย |
+|-------|--------|-----------|
+| 1 | ✅ | SQLite schema + repository |
+| 2 | ✅ | Scout pipeline (identify → decrypt → hash → parse → save → copy) |
+| 3 | ✅ | WPF Manager (DataGrid, filter, preview, conflict, merge) |
+| 4 | ✅ | Integration tests + edge cases |
+| 5 | ✅ | Scout scanning scope — C: specific folders only, other drives full scan |

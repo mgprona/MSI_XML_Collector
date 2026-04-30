@@ -1,25 +1,54 @@
 # MSI XML Collector
 
 ## วัตถุประสงค์
-รวบรวมไฟล์ .xml จากคอมพิวเตอร์หลายเครื่องผ่าน USB
-โดยใช้ MD5 Hash คุม deduplication และรองรับ XML ทั้งแบบ plain และเข้ารหัส AES
+รวบรวมไฟล์ XML งานสำรวจที่ดิน (DOL) จากหลายเครื่องผ่าน USB  
+deduplication ด้วย MD5, รองรับ XML แบบ plain และเข้ารหัส AES
+
+---
 
 ## โครงสร้าง USB
-Scout_XML.exe | secrets.key | Master_Index.db | Collected_XMLs\
 
-## XML สองรูปแบบ
-- **Encrypted** (เวอร์ชันใหม่): root = `<Root>` / table = `<TB_ENCRYPT>` / ข้อมูลใน `<data>` เป็น Base64+AES
-- **Plaintext** (เวอร์ชันเก่า): root = `<NewDataSet>` / table = `<TB_SVC_SURVEYDESC>`
+```
+Scout_XML.exe       ← รันตรงนี้
+secrets.key         ← AES key 48 bytes (สร้างจาก passphrase)
+Master_Index.db     ← SQLite (สร้างอัตโนมัติ)
+Collected_XMLs\     ← ไฟล์ที่เก็บได้ (สร้างอัตโนมัติ)
+```
 
-## Key Management
-AES key อ่านจาก `secrets.key` ข้างๆ Scout_XML.exe บน USB
-ถอดรหัส in-memory เท่านั้น ไม่เขียนไฟล์ทิ้ง
-**secrets.key และ *.db อยู่ใน .gitignore**
+---
 
-## Projects
-- **Scout** (Console App): scan → identify → decrypt → hash → copy
-- **Manager** (WPF): dashboard → preview → conflict → import
+## การใช้งาน Scout
 
-## Field หลักจาก TB_SVC_SURVEYDESC
-SURVEYJOB_NO, OWNER_NAME, QUEUE_DATE, PROVINCE_NAME,
-AMPHUR_SEQ, TAMBOL_SEQ, LAND_NO, SURVEY_NO, SURVEYOR_NAME
+**ปกติ (Auto mode) — รันแล้วจบ:**
+```
+Scout_XML.exe
+```
+สแกนอัตโนมัติ:
+- `C:\DOLCAD_XML`
+- `C:\Users\*\Desktop`
+- `C:\Users\*\Documents`
+- Drive อื่น (D:, E:, ...) ทั้ง drive
+
+**ทดสอบ (Manual mode):**
+```
+Scout_XML.exe --source C:\MSI\TestData
+```
+
+---
+
+## secrets.key
+
+ไฟล์ binary 48 bytes — derive จาก passphrase ของระบบ MSI  
+ถ้าไม่มี: ไฟล์ plain XML ยังทำงานได้ปกติ, ไฟล์ encrypted จะ `[ERROR]`
+
+---
+
+## Manager
+
+เปิด `Manager.exe` → เปิด DB → ดูข้อมูล, filter, merge จาก USB อื่น
+
+---
+
+## ไฟล์ตัวอย่าง (docs/)
+- `2011_25-02-2569.XML` — Plaintext format
+- `1006_25-11-2563.XML` — Encrypted format

@@ -8,20 +8,20 @@ namespace Scout.Scanner;
 
 public class FileScanner
 {
-    private readonly string _sourceRoot;
+    private readonly IReadOnlyList<ScanTarget> _targets;
     private readonly string _collectRoot;
     private readonly string _machineName;
     private readonly AesDecryptor? _decryptor;
     private readonly FileRecordRepository _repo;
 
     public FileScanner(
-        string sourceRoot,
+        IReadOnlyList<ScanTarget> targets,
         string collectRoot,
         string machineName,
         AesDecryptor? decryptor,
         FileRecordRepository repo)
     {
-        _sourceRoot  = sourceRoot;
+        _targets     = targets;
         _collectRoot = collectRoot;
         _machineName = machineName;
         _decryptor   = decryptor;
@@ -31,25 +31,38 @@ public class FileScanner
     public ScanSummary Run()
     {
         var summary = new ScanSummary();
-        var files   = Directory.EnumerateFiles(_sourceRoot, "*.xml", SearchOption.AllDirectories);
 
-        foreach (var filePath in files)
+        foreach (var target in _targets)
         {
-            summary.Total++;
-            try
+            if (!Directory.Exists(target.ScanPath))
             {
-                ProcessFile(filePath, summary);
+                Console.WriteLine($"[SKIP]  {target.ScanPath} — ไม่พบโฟลเดอร์");
+                continue;
             }
-            catch (Exception ex)
+
+            Console.WriteLine($"[SCAN]  {target.ScanPath}");
+
+            foreach (var filePath in SafeEnumerateXml(target.ScanPath))
             {
-                summary.Errors++;
-                Console.Error.WriteLine($"[ERROR] {filePath}: {ex.Message}");
+                summary.Total++;
+                try
+                {
+                    ProcessFile(filePath, target.DriveRoot, summary);
+                }
+                catch (Exception ex)
+                {
+                    summary.Errors++;
+                    Console.Error.WriteLine($"[ERROR] {filePath}: {ex.Message}");
+                }
             }
         }
+
         return summary;
     }
 
-    private void ProcessFile(string filePath, ScanSummary summary)
+    // ── Private helpers ───────────────────────────────────────────────────────
+
+    private void ProcessFile(string filePath, string driveRoot, ScanSummary summary)
     {
         var rawBytes = File.ReadAllBytes(filePath);
         var format   = XmlIdentifier.Detect(rawBytes);
@@ -57,22 +70,22 @@ public class FileScanner
         if (format == XmlFormat.Unknown)
         {
             summary.Skipped++;
-            Console.WriteLine($"[SKIP]  {filePath} — not a recognised MSI XML");
+            Console.WriteLine($"[SKIP]  {filePath} — ไม่ใช่ MSI XML");
             return;
         }
 
+        bool   isEncrypted = format == XmlFormat.Encrypted;
         byte[] plaintextBytes;
-        bool isEncrypted = format == XmlFormat.Encrypted;
 
-        if (isEncrypted)
+        if (isEncrypted && _decryptor is not null)
         {
-            if (_decryptor is null)
-                throw new InvalidOperationException("secrets.key required to decrypt this file.");
-
+            // ถอดรหัสใน memory เพื่ออ่าน fields — ไม่เขียนไฟล์ถอดรหัสทิ้ง
             plaintextBytes = _decryptor.DecryptXml(rawBytes);
         }
         else
         {
+            // plain XML หรือ encrypted แต่ไม่มี key → ใช้ raw bytes
+            // (encrypted ไม่มี key: fields จะเป็น null แต่ยังคัดลอกและบันทึก DB ได้)
             plaintextBytes = rawBytes;
         }
 
@@ -110,28 +123,50 @@ public class FileScanner
         };
 
         _repo.Upsert(record);
-        CopyFile(filePath, rawBytes);
+        CopyFile(filePath, driveRoot, rawBytes);
 
         summary.Collected++;
-        Console.WriteLine($"[OK]    {filePath} [{(isEncrypted ? "ENC" : "PLAIN")}] {fields?.SurveyJobNo ?? "-"}");
+        var tag = isEncrypted
+            ? (_decryptor is not null ? "ENC" : "ENC-NO-KEY")
+            : "PLAIN";
+        Console.WriteLine($"[OK]    {filePath} [{tag}] {fields?.SurveyJobNo ?? "-"}");
     }
 
-    private void CopyFile(string sourcePath, byte[] rawBytes)
+    private void CopyFile(string sourcePath, string driveRoot, byte[] rawBytes)
     {
-        // Preserve directory structure: Collected_XMLs\[MachineName]\[relative path from source root]
-        var relative = Path.GetRelativePath(_sourceRoot, sourcePath);
+        var relative = Path.GetRelativePath(driveRoot, sourcePath);
         var dest     = Path.Combine(_collectRoot, _machineName, relative);
-
         Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-
-        // Always copy the original (possibly encrypted) file — never the decrypted plaintext
         File.WriteAllBytes(dest, rawBytes);
     }
 
     private static string ComputeMd5(byte[] data)
+        => Convert.ToHexString(MD5.HashData(data)).ToLowerInvariant();
+
+    /// <summary>
+    /// Enumerate *.xml แบบ recursive — ข้ามโฟลเดอร์ที่ access denied โดยไม่หยุด
+    /// </summary>
+    private static IEnumerable<string> SafeEnumerateXml(string root)
     {
-        var hash = MD5.HashData(data);
-        return Convert.ToHexString(hash).ToLowerInvariant();
+        var pending = new Queue<string>();
+        pending.Enqueue(root);
+
+        while (pending.Count > 0)
+        {
+            var dir = pending.Dequeue();
+
+            IEnumerable<string> files;
+            try   { files = Directory.EnumerateFiles(dir, "*.xml"); }
+            catch { continue; }
+
+            foreach (var f in files) yield return f;
+
+            IEnumerable<string> subdirs;
+            try   { subdirs = Directory.EnumerateDirectories(dir); }
+            catch { continue; }
+
+            foreach (var s in subdirs) pending.Enqueue(s);
+        }
     }
 }
 
