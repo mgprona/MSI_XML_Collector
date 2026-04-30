@@ -44,7 +44,10 @@ public static class ManagerDb
     /// Copy ไฟล์ทั้งหมดจาก Collected_XMLs ข้าง source DB มายัง Collected_XMLs ข้าง target DB
     /// ไฟล์ที่มีอยู่แล้วจะข้าม (ไม่ overwrite)
     /// </summary>
-    public static (int Copied, int Skipped) CopyCollectedFiles(string sourceDbPath, string targetDbPath)
+    public static (int Copied, int Skipped) CopyCollectedFiles(
+        string sourceDbPath,
+        string targetDbPath,
+        IProgress<string>? progress = null)
     {
         var srcRoot = Path.Combine(Path.GetDirectoryName(sourceDbPath)!, "Collected_XMLs");
         var dstRoot = Path.Combine(Path.GetDirectoryName(targetDbPath)!, "Collected_XMLs");
@@ -63,6 +66,9 @@ public static class ManagerDb
             Directory.CreateDirectory(Path.GetDirectoryName(dstFile)!);
             File.Copy(srcFile, dstFile);
             copied++;
+
+            if ((copied + skipped) % 100 == 0)
+                progress?.Report($"กำลัง copy ไฟล์ XML... copy {copied:N0}, ข้าม {skipped:N0}");
         }
 
         return (copied, skipped);
@@ -72,7 +78,7 @@ public static class ManagerDb
     /// ลบไฟล์ทั้งหมดใน Collected_XMLs ข้าง source DB (เก็บ DB ไว้)
     /// คืนค่าจำนวนไฟล์ที่ลบ
     /// </summary>
-    public static int DeleteCollectedFiles(string sourceDbPath)
+    public static int DeleteCollectedFiles(string sourceDbPath, IProgress<string>? progress = null)
     {
         var srcRoot = Path.Combine(Path.GetDirectoryName(sourceDbPath)!, "Collected_XMLs");
         if (!Directory.Exists(srcRoot)) return 0;
@@ -81,12 +87,16 @@ public static class ManagerDb
         foreach (var subDir in Directory.GetDirectories(srcRoot))
         {
             deleted += Directory.GetFiles(subDir, "*", SearchOption.AllDirectories).Length;
+            progress?.Report($"กำลังลบไฟล์บน USB... {deleted:N0} ไฟล์");
             Directory.Delete(subDir, recursive: true);
         }
         return deleted;
     }
 
-    public static (int Inserted, int Updated) MergeFrom(string sourceDbPath, string targetDbPath)
+    public static (int Inserted, int Updated) MergeFrom(
+        string sourceDbPath,
+        string targetDbPath,
+        IProgress<string>? progress = null)
     {
         var sourceRecords = LoadAll(sourceDbPath);
         int inserted = 0, updated = 0;
@@ -95,11 +105,15 @@ public static class ManagerDb
         conn.Open();
         EnsureSchema(conn);
 
-        foreach (var r in sourceRecords)
+        for (var i = 0; i < sourceRecords.Count; i++)
         {
+            var r = sourceRecords[i];
             bool exists = ExistsByHash(conn, r.FileHash, r.MachineName);
             Upsert(conn, r);
             if (exists) updated++; else inserted++;
+
+            if ((i + 1) % 100 == 0)
+                progress?.Report($"กำลัง merge DB... {i + 1:N0} / {sourceRecords.Count:N0} รายการ");
         }
 
         return (inserted, updated);

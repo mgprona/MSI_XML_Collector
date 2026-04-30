@@ -10,6 +10,7 @@ secrets.key
 # Build outputs
 bin/
 obj/
+publish/
 Collected_XMLs/
 
 # VS/Rider

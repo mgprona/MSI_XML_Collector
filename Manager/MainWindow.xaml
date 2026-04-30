@@ -14,6 +14,9 @@
             <Button x:Name="btnMerge" Content="Merge จาก USB..." Padding="10,3"
                     Click="BtnMerge_Click"/>
             <Separator/>
+            <Button x:Name="btnExport" Content="Export CSV..." Padding="10,3"
+                    Click="BtnExport_Click"/>
+            <Separator/>
             <TextBlock x:Name="txtDbPath" VerticalAlignment="Center"
                        Foreground="Gray" Text="(ยังไม่ได้เปิด DB)"
                        MaxWidth="600" TextTrimming="CharacterEllipsis" Margin="4,0"/>
@@ -23,6 +26,12 @@
         <StatusBar DockPanel.Dock="Bottom">
             <StatusBarItem>
                 <TextBlock x:Name="txtStatus" Text="พร้อม"/>
+            </StatusBarItem>
+            <StatusBarItem>
+                <ProgressBar x:Name="progressStatus"
+                             Width="140" Height="14"
+                             Visibility="Collapsed"
+                             IsIndeterminate="True"/>
             </StatusBarItem>
             <Separator/>
             <StatusBarItem>

@@ -4,6 +4,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using Manager.Crypto;
 using Manager.Data;
 using Manager.Models;
 using Microsoft.Win32;
@@ -199,10 +200,10 @@ public partial class MainWindow : Window
 
         try
         {
-            var text = File.ReadAllText(hits[0], Encoding.UTF8);
             if (r.IsEncrypted)
-                text = "[ไฟล์เข้ารหัส — เนื้อหาด้านล่างเป็น raw XML ก่อนถอดรหัส]\n\n" + text;
-            return text;
+                return TryDecryptXmlFile(hits[0]);
+
+            return File.ReadAllText(hits[0], Encoding.UTF8);
         }
         catch (Exception ex)
         {
@@ -210,9 +211,151 @@ public partial class MainWindow : Window
         }
     }
 
+    private string TryDecryptXmlFile(string encryptedFilePath)
+    {
+        var keyPath = FindSecretsKeyPath();
+        if (keyPath is null)
+        {
+            var raw = File.ReadAllText(encryptedFilePath, Encoding.UTF8);
+            return "[ไฟล์เข้ารหัส — ไม่พบ secrets.key สำหรับ preview]\n\n" +
+                   "ตำแหน่งที่ Manager จะลองหา:\n" +
+                   "- ข้าง Master_Index.db ที่เปิดอยู่\n" +
+                   "- ข้าง Manager.exe\n\n" +
+                   raw;
+        }
+
+        try
+        {
+            var decryptor = AesDecryptor.LoadFromFile(keyPath);
+            var plaintextBytes = decryptor.DecryptXml(File.ReadAllBytes(encryptedFilePath));
+            var plaintext = Encoding.UTF8.GetString(plaintextBytes);
+            return $"[ถอดรหัสด้วย {keyPath}]\n\n{plaintext}";
+        }
+        catch (Exception ex)
+        {
+            var raw = File.ReadAllText(encryptedFilePath, Encoding.UTF8);
+            return $"[ถอดรหัสไม่สำเร็จ: {ex.Message}]\n\n{raw}";
+        }
+    }
+
+    private string? FindSecretsKeyPath()
+    {
+        var candidates = new List<string>();
+
+        if (_currentDbPath is not null)
+            candidates.Add(Path.Combine(Path.GetDirectoryName(_currentDbPath)!, "secrets.key"));
+
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "secrets.key"));
+
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    // ── Export ───────────────────────────────────────────────────────────────
+
+    private void BtnExport_Click(object sender, RoutedEventArgs e)
+    {
+        if (_view is null)
+        {
+            MessageBox.Show("กรุณาเปิด DB ก่อน export",
+                "Export CSV", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var rows = _view.Cast<FileRecord>().ToList();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show("ไม่มีรายการให้ export ตาม filter ปัจจุบัน",
+                "Export CSV", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var dlg = new SaveFileDialog
+        {
+            Title = "Export CSV",
+            Filter = "CSV file (*.csv)|*.csv",
+            FileName = $"MSI_XML_Export_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        try
+        {
+            var csv = BuildCsv(rows);
+            File.WriteAllText(dlg.FileName, csv, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+
+            txtStatus.Text = $"Exported {rows.Count:N0} records";
+            MessageBox.Show($"Export สำเร็จ {rows.Count:N0} รายการ\n{dlg.FileName}",
+                "Export CSV", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            txtStatus.Text = "Export failed";
+            MessageBox.Show($"Export ไม่สำเร็จ:\n{ex.Message}",
+                "Export CSV", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private static string BuildCsv(IEnumerable<FileRecord> rows)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(string.Join(",", new[]
+        {
+            "SurveyJobNo",
+            "OwnerName",
+            "QueueDate",
+            "ProvinceName",
+            "AmphurSeq",
+            "TambolSeq",
+            "LandNo",
+            "SurveyNo",
+            "SurveyorName",
+            "MachineName",
+            "OriginalFileName",
+            "OriginalPath",
+            "FileSize",
+            "Format",
+            "LastWriteTime",
+            "CollectedAt",
+            "FileHash",
+            "IsConflict",
+        }));
+
+        foreach (var r in rows)
+        {
+            sb.AppendLine(string.Join(",", new[]
+            {
+                Csv(r.SurveyJobNo),
+                Csv(r.OwnerName),
+                Csv(r.QueueDate?.ToString("O")),
+                Csv(r.ProvinceName),
+                Csv(r.AmphurSeq?.ToString()),
+                Csv(r.TambolSeq?.ToString()),
+                Csv(r.LandNo?.ToString()),
+                Csv(r.SurveyNo?.ToString()),
+                Csv(r.SurveyorName),
+                Csv(r.MachineName),
+                Csv(r.OriginalFileName),
+                Csv(r.OriginalPath),
+                Csv(r.FileSize.ToString()),
+                Csv(r.EncryptedDisplay),
+                Csv(r.LastWriteTime.ToString("O")),
+                Csv(r.CollectedAt.ToString("O")),
+                Csv(r.FileHash),
+                Csv(r.IsConflict ? "Yes" : "No"),
+            }));
+        }
+
+        return sb.ToString();
+    }
+
+    private static string Csv(string? value)
+    {
+        value ??= "";
+        return "\"" + value.Replace("\"", "\"\"") + "\"";
+    }
+
     // ── Merge ────────────────────────────────────────────────────────────────
 
-    private void BtnMerge_Click(object sender, RoutedEventArgs e)
+    private async void BtnMerge_Click(object sender, RoutedEventArgs e)
     {
         // ถ้ายังไม่มี master DB → ให้เลือกที่บันทึกก่อน (ครั้งแรก)
         if (_currentDbPath is null)
@@ -243,13 +386,23 @@ public partial class MainWindow : Window
             return;
         }
 
+        SetBusy(true, "กำลังเตรียม merge...");
+        var progress = new Progress<string>(message => txtStatus.Text = message);
+
         try
         {
             txtStatus.Text = "กำลัง merge DB...";
-            var (inserted, updated) = ManagerDb.MergeFrom(dlg.FileName, _currentDbPath);
+            var targetDbPath = _currentDbPath;
+            var sourceDbPath = dlg.FileName;
+
+            var (inserted, updated) = await Task.Run(() =>
+                ManagerDb.MergeFrom(sourceDbPath, targetDbPath, progress));
 
             txtStatus.Text = "กำลัง copy ไฟล์ XML...";
-            var (copied, skipped) = ManagerDb.CopyCollectedFiles(dlg.FileName, _currentDbPath);
+            var (copied, skipped) = await Task.Run(() =>
+                ManagerDb.CopyCollectedFiles(sourceDbPath, targetDbPath, progress));
+
+            SetBusy(false, "Merge สำเร็จ");
 
             // ถามลบ Collected_XMLs บน USB
             var deleteResult = MessageBox.Show(
@@ -261,12 +414,15 @@ public partial class MainWindow : Window
 
             if (deleteResult == MessageBoxResult.Yes)
             {
-                int deleted = ManagerDb.DeleteCollectedFiles(dlg.FileName);
+                SetBusy(true, "กำลังลบไฟล์บน USB...");
+                int deleted = await Task.Run(() => ManagerDb.DeleteCollectedFiles(sourceDbPath, progress));
+                SetBusy(false, "ลบไฟล์ USB สำเร็จ");
+
                 MessageBox.Show($"ลบไฟล์ใน USB เรียบร้อย {deleted:N0} ไฟล์",
                     "ลบสำเร็จ", MessageBoxButton.OK, MessageBoxImage.Information);
             }
 
-            LoadDb(_currentDbPath);
+            LoadDb(targetDbPath);
         }
         catch (Exception ex)
         {
@@ -274,5 +430,19 @@ public partial class MainWindow : Window
             MessageBox.Show($"Merge ไม่สำเร็จ:\n{ex.Message}",
                 "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+        finally
+        {
+            SetBusy(false, txtStatus.Text);
+        }
+    }
+
+    private void SetBusy(bool isBusy, string status)
+    {
+        txtStatus.Text = status;
+        progressStatus.Visibility = isBusy ? Visibility.Visible : Visibility.Collapsed;
+        btnOpenDb.IsEnabled = !isBusy;
+        btnMerge.IsEnabled = !isBusy;
+        btnExport.IsEnabled = !isBusy;
+        dgFiles.IsEnabled = !isBusy;
     }
 }
